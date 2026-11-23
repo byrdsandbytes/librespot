@@ -18,6 +18,47 @@ use protobuf::MessageField;
 use std::collections::HashMap;
 use uuid::Uuid;
 
+/// The uri of a [ContextTrack], taken from its uri or, when that is missing, its gid.
+fn context_track_uri(track: &ContextTrack) -> Option<String> {
+    match (track.uri.as_deref(), track.gid.as_deref()) {
+        (Some(uri), _) if !uri.is_empty() => Some(uri.to_string()),
+        (_, Some(gid)) if !gid.is_empty() => SpotifyId::from_raw(gid)
+            .ok()
+            .map(|id| SpotifyUri::Track { id }.to_uri()),
+        _ => None,
+    }
+}
+
+/// Whether two track uids identify the same item.
+///
+/// Spotify clients don't agree on the encoding of a uid: next to the plain uid
+/// (`d3f9d21693979924`) some send its ascii hex-encoded form
+/// (`64336639643231363933393739393234`), so both forms are compared decoded.
+pub(crate) fn uid_matches(a: &str, b: &str) -> bool {
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+
+    a == b || decode_hex_uid(a).as_deref().unwrap_or(a) == decode_hex_uid(b).as_deref().unwrap_or(b)
+}
+
+/// Decodes a uid that is the hex encoding of an ascii alphanumeric uid.
+fn decode_hex_uid(uid: &str) -> Option<String> {
+    if uid.is_empty() || uid.len() % 2 != 0 || !uid.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+
+    (0..uid.len())
+        .step_by(2)
+        .map(|i| {
+            u8::from_str_radix(&uid[i..i + 2], 16)
+                .ok()
+                .filter(u8::is_ascii_alphanumeric)
+                .map(char::from)
+        })
+        .collect()
+}
+
 const LOCAL_FILES_IDENTIFIER: &str = "spotify:local-files";
 const SEARCH_IDENTIFIER: &str = "spotify:search";
 
@@ -400,11 +441,11 @@ impl ConnectState {
         let current_context = self.get_context_mut(ContextType::Default).ok()?;
 
         for new_track in new_page?.tracks {
-            if new_track.uri.is_none() || matches!(new_track.uri, Some(ref uri) if uri.is_empty()) {
+            // some clients only identify the tracks of the page by their gid
+            let Some(new_track_uri) = context_track_uri(&new_track) else {
                 continue;
-            }
+            };
 
-            let new_track_uri = new_track.uri.unwrap_or_default();
             if let Ok(position) =
                 Self::find_index_in_context(current_context, |t| t.uri == new_track_uri)
             {
@@ -414,11 +455,10 @@ impl ConnectState {
                     context_track.metadata.insert(key, value);
                 }
 
-                // the uid provided from another context might be actual uid of an item
-                if new_track.uid.is_some()
-                    || matches!(new_track.uid, Some(ref uid) if uid.is_empty())
-                {
-                    context_track.uid = new_track.uid.unwrap_or_default();
+                // the uid provided from another context might be actual uid of an item,
+                // the client then refers to the track by that uid (e.g. in skip_to)
+                if let Some(uid) = new_track.uid.filter(|uid| !uid.is_empty()) {
+                    context_track.uid = uid;
                 }
             }
         }
@@ -516,5 +556,43 @@ impl ConnectState {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uid_matches_plain_and_hex_encoded() {
+        assert!(uid_matches("d3f9d21693979924", "d3f9d21693979924"));
+        assert!(uid_matches(
+            "d3f9d21693979924",
+            "64336639643231363933393739393234"
+        ));
+        assert!(uid_matches(
+            "64336639643231363933393739393234",
+            "d3f9d21693979924"
+        ));
+    }
+
+    #[test]
+    fn uid_matches_rejects_different_or_empty() {
+        assert!(!uid_matches("d3f9d21693979924", "d67a75482dd7f3f8"));
+        assert!(!uid_matches("", ""));
+        assert!(!uid_matches("d3f9d21693979924", ""));
+    }
+
+    #[test]
+    fn context_track_uri_falls_back_to_gid() {
+        let track = ContextTrack {
+            uri: Some(String::new()),
+            gid: Some(vec![0; 16]),
+            ..Default::default()
+        };
+        assert_eq!(
+            context_track_uri(&track).as_deref(),
+            Some("spotify:track:0000000000000000000000")
+        );
     }
 }
