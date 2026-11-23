@@ -27,7 +27,7 @@ use crate::{
         user_attributes::UserAttributesMutation,
     },
     state::{
-        context::{ContextType, ResetContext},
+        context::{ContextType, ResetContext, uid_matches},
         provider::IsProvider,
         {ConnectConfig, ConnectState},
     },
@@ -1410,7 +1410,7 @@ impl SpircTask {
                 }
                 PlayingTrack::Uid(uid) => {
                     let ctx = self.connect_state.get_context(ContextType::Default)?;
-                    ConnectState::find_index_in_context(ctx, |t| &t.uid == uid)
+                    ConnectState::find_index_in_context(ctx, |t| uid_matches(&t.uid, uid))
                 }
             }),
         }
